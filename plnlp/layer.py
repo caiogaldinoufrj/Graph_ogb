@@ -63,6 +63,71 @@ class Transformer(BaseGNN):
             self.convs.append(TransformerConv(first_channels, second_channels))
 
 
+# =======================================================================
+# [CIRURGIA ABLAÇÃO: ESPACIAL] Difusão Dinâmica (Módulo Inception)
+# =======================================================================
+class InceptionGNN(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, num_layers, dropout):
+        super(InceptionGNN, self).__init__()
+        self.dropout = dropout
+        
+        # Como o Inception tem saltos fixos, nós definimos a topologia manualmente
+        # Canal A: 1 Salto (Vizinhos diretos)
+        self.branch1_conv = SAGEConv(in_channels, hidden_channels)
+        
+        # Canal B: 2 Saltos (Amigos dos amigos)
+        self.branch2_conv1 = SAGEConv(in_channels, hidden_channels)
+        self.branch2_conv2 = SAGEConv(hidden_channels, hidden_channels)
+        
+        # Canal C: 3 Saltos (Comunidade expandida)
+        self.branch3_conv1 = SAGEConv(in_channels, hidden_channels)
+        self.branch3_conv2 = SAGEConv(hidden_channels, hidden_channels)
+        self.branch3_conv3 = SAGEConv(hidden_channels, hidden_channels)
+        
+        # O Fuso de Concatenamento: Reduz a soma dos canais de volta para a dimensão esperada
+        self.project = torch.nn.Linear(3 * hidden_channels, hidden_channels)
+
+    def reset_parameters(self):
+        self.branch1_conv.reset_parameters()
+        self.branch2_conv1.reset_parameters()
+        self.branch2_conv2.reset_parameters()
+        self.branch3_conv1.reset_parameters()
+        self.branch3_conv2.reset_parameters()
+        self.branch3_conv3.reset_parameters()
+        self.project.reset_parameters()
+
+    def forward(self, x, adj_t):
+        # Fluxo Paralelo A: 1-hop
+        h1 = self.branch1_conv(x, adj_t)
+        h1 = F.relu(h1)
+        h1 = F.dropout(h1, p=self.dropout, training=self.training)
+        
+        # Fluxo Paralelo B: 2-hops
+        h2 = self.branch2_conv1(x, adj_t)
+        h2 = F.relu(h2)
+        h2 = F.dropout(h2, p=self.dropout, training=self.training)
+        h2 = self.branch2_conv2(h2, adj_t)
+        h2 = F.relu(h2)
+        h2 = F.dropout(h2, p=self.dropout, training=self.training)
+        
+        # Fluxo Paralelo C: 3-hops
+        h3 = self.branch3_conv1(x, adj_t)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
+        h3 = self.branch3_conv2(h3, adj_t)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
+        h3 = self.branch3_conv3(h3, adj_t)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
+        
+        # A Mágica do Inception: Concatenar as perspectivas e fundir
+        out = torch.cat([h1, h2, h3], dim=-1)
+        out = self.project(out)
+        
+        return out
+# =======================================================================
+
 class MLPPredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
         super(MLPPredictor, self).__init__()
@@ -79,6 +144,31 @@ class MLPPredictor(torch.nn.Module):
 
     def forward(self, x_i, x_j):
         x = x_i * x_j
+        for lin in self.lins[:-1]:
+            x = lin(x)
+            x = F.relu(x)
+            x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.lins[-1](x)
+        return x
+
+
+class MLPSinglePredictor(torch.nn.Module):
+    """MLP predictor that accepts a single input tensor (for concatenated features)."""
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
+        super(MLPSinglePredictor, self).__init__()
+        self.lins = torch.nn.ModuleList()
+        for i in range(num_layers):
+            first_channels = in_channels if i == 0 else hidden_channels
+            second_channels = out_channels if i == num_layers - 1 else hidden_channels
+            self.lins.append(torch.nn.Linear(first_channels, second_channels))
+        self.dropout = dropout
+
+    def reset_parameters(self):
+        for lin in self.lins:
+            lin.reset_parameters()
+
+    def forward(self, x):
+        # x is a single tensor [batch, in_channels]
         for lin in self.lins[:-1]:
             x = lin(x)
             x = F.relu(x)

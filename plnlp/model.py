@@ -1,51 +1,79 @@
 # -*- coding: utf-8 -*-
 import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from plnlp.layer import *
 from plnlp.loss import *
 from plnlp.utils import *
 
+# =======================================================================
+# [CIRURGIA ABLAÇÃO: TEMPORAL] Codificador de Bochner (Tempo Contínuo)
+# =======================================================================
+class TimeEncoder(nn.Module):
+    def __init__(self, time_dim):
+        super(TimeEncoder, self).__init__()
+        self.time_dim = time_dim
+        # Frequências treináveis (Bochner)
+        self.w = nn.Linear(1, time_dim // 2)
+
+    def forward(self, t):
+        # t shape: [batch_size, 1]
+        t = t.float()
+        freqs = self.w(t)
+        # Teorema de Bochner: concatenação de senos e cossenos
+        time_emb = torch.cat([torch.sin(freqs), torch.cos(freqs)], dim=-1)
+        return time_emb
+
+# =======================================================================
+# [CIRURGIA ABLAÇÃO: PREDITOR] Preditor Personalizado (Hadamard + Tempo + AA-DC)
+# =======================================================================
+class AblationPredictor(nn.Module):
+    def __init__(self, hidden_channels, time_dim, num_layers, dropout, use_temporal, use_heuristic):
+        super(AblationPredictor, self).__init__()
+        self.use_temporal = use_temporal
+        self.use_heuristic = use_heuristic
+        
+        # Calcula a dimensão de entrada do MLP baseado nas flags ativadas
+        input_dim = hidden_channels  
+        
+        if use_temporal:
+            self.time_encoder = TimeEncoder(time_dim)
+            input_dim += time_dim
+            
+        if use_heuristic:
+            input_dim += 1 # +1 para o valor escalar do AA-DC
+            
+        # MLP de Decisão Final (usa um MLP que aceita um tensor concatenado)
+        self.mlp = MLPSinglePredictor(input_dim, hidden_channels, 1, num_layers, dropout)
+
+    def forward(self, z_u, z_v, edge_dt=None, edge_aadc=None):
+        # 1. Sinal Estrutural (Hadamard)
+        features = [z_u * z_v]
+        
+        # 2. Sinal Temporal (Bochner)
+        if self.use_temporal and edge_dt is not None:
+            time_emb = self.time_encoder(edge_dt)
+            features.append(time_emb)
+            
+        # 3. Sinal Heurístico (AA-DC)
+        if self.use_heuristic and edge_aadc is not None:
+            features.append(edge_aadc.unsqueeze(-1)) # Transforma um número solto num vetor [batch, 1]
+            
+        # Concatena os sinais ativados e toma a decisão
+        z_pred = torch.cat(features, dim=-1)
+        return self.mlp(z_pred)
+
 
 class BaseModel(object):
-    """
-        Parameters
-        ----------
-        lr : double
-            Learning rate
-        dropout : double
-            dropout probability for gnn and mlp layers
-        gnn_num_layers : int
-            number of gnn layers
-        mlp_num_layers : int
-            number of gnn layers
-        *_hidden_channels : int
-            dimension of hidden
-        num_nodes : int
-            number of graph nodes
-        num_node_feats : int
-            dimension of raw node features
-        gnn_encoder_name : str
-            gnn encoder name
-        predictor_name: str
-            link predictor name
-        loss_func: str
-            loss function name
-        optimizer_name: str
-            optimization method name
-        device: str
-            device name: gpu or cpu
-        use_node_feats: bool
-            whether to use raw node features as input
-        train_node_emb: bool
-            whether to train node embeddings based on node id
-        pretrain_emb: str
-            whether to load pretrained node embeddings
-    """
-
     def __init__(self, lr, dropout, grad_clip_norm, gnn_num_layers, mlp_num_layers, emb_hidden_channels,
                  gnn_hidden_channels, mlp_hidden_channels, num_nodes, num_node_feats, gnn_encoder_name,
                  predictor_name, loss_func, optimizer_name, device, use_node_feats, train_node_emb,
-                 pretrain_emb=None):
+                 pretrain_emb=None, 
+                 # [CIRURGIA ABLAÇÃO: FLAGS INJETADAS AQUI]
+                 spatial_mode='base', use_temporal=False, use_heuristic=False):
+        
         self.loss_func_name = loss_func
         self.num_nodes = num_nodes
         self.num_node_feats = num_node_feats
@@ -53,6 +81,11 @@ class BaseModel(object):
         self.train_node_emb = train_node_emb
         self.clip_norm = grad_clip_norm
         self.device = device
+        
+        # Salva o estado da ablação
+        self.spatial_mode = spatial_mode.lower()
+        self.use_temporal = use_temporal
+        self.use_heuristic = use_heuristic
 
         # Input Layer
         self.input_channels, self.emb = create_input_layer(num_nodes=num_nodes,
@@ -65,17 +98,26 @@ class BaseModel(object):
             self.emb = self.emb.to(device)
 
         # GNN Layer
+        # O encoder_name vai ditar se é SAGE, GCN ou o novo INCEPTION
         self.encoder = create_gnn_layer(input_channels=self.input_channels,
                                         hidden_channels=gnn_hidden_channels,
                                         num_layers=gnn_num_layers,
                                         dropout=dropout,
                                         encoder_name=gnn_encoder_name).to(device)
 
-        # Predict Layer
-        self.predictor = create_predictor_layer(hidden_channels=mlp_hidden_channels,
-                                                num_layers=mlp_num_layers,
-                                                dropout=dropout,
-                                                predictor_name=predictor_name).to(device)
+        # [CIRURGIA ABLAÇÃO: PREDITOR] Substitui o preditor padrão pelo nosso Preditor de Ablação
+        if self.use_temporal or self.use_heuristic:
+            self.predictor = AblationPredictor(hidden_channels=mlp_hidden_channels, 
+                                               time_dim=128, # Configuração fixa de dimensão de tempo
+                                               num_layers=mlp_num_layers, 
+                                               dropout=dropout,
+                                               use_temporal=self.use_temporal,
+                                               use_heuristic=self.use_heuristic).to(device)
+        else:
+            self.predictor = create_predictor_layer(hidden_channels=mlp_hidden_channels,
+                                                    num_layers=mlp_num_layers,
+                                                    dropout=dropout,
+                                                    predictor_name=predictor_name).to(device)
 
         # Parameters and Optimizer
         self.para_list = list(self.encoder.parameters()) + list(self.predictor.parameters())
@@ -91,7 +133,11 @@ class BaseModel(object):
 
     def param_init(self):
         self.encoder.reset_parameters()
-        self.predictor.reset_parameters()
+        if hasattr(self.predictor, 'mlp'): # Caso seja o AblationPredictor
+            self.predictor.mlp.reset_parameters()
+        else:
+            self.predictor.reset_parameters()
+            
         if self.emb is not None:
             torch.nn.init.xavier_uniform_(self.emb.weight)
 
@@ -126,58 +172,105 @@ class BaseModel(object):
         return loss
 
     def train(self, data, split_edge, batch_size, neg_sampler_name, num_neg):
-        self.encoder.train()
-        self.predictor.train()
+            self.encoder.train()
+            self.predictor.train()
 
-        pos_train_edge, neg_train_edge = get_pos_neg_edges('train', split_edge,
-                                                           edge_index=data.edge_index,
-                                                           num_nodes=self.num_nodes,
-                                                           neg_sampler_name=neg_sampler_name,
-                                                           num_neg=num_neg)
+            pos_train_edge, neg_train_edge = get_pos_neg_edges('train', split_edge,
+                                                            edge_index=data.edge_index,
+                                                            num_nodes=self.num_nodes,
+                                                            neg_sampler_name=neg_sampler_name,
+                                                            num_neg=num_neg)
 
-        pos_train_edge, neg_train_edge = pos_train_edge.to(self.device), neg_train_edge.to(self.device)
+            pos_train_edge, neg_train_edge = pos_train_edge.to(self.device), neg_train_edge.to(self.device)
 
-        if 'weight' in split_edge['train']:
-            edge_weight_margin = split_edge['train']['weight'].to(self.device)
-        else:
-            edge_weight_margin = None
+            if 'weight' in split_edge['train']:
+                edge_weight_margin = split_edge['train']['weight'].to(self.device)
+            else:
+                edge_weight_margin = None
 
-        total_loss = total_examples = 0
+            total_loss = total_examples = 0
 
-        for perm in DataLoader(range(pos_train_edge.size(0)), batch_size, shuffle=True):
-            self.optimizer.zero_grad()
+            for perm in DataLoader(range(pos_train_edge.size(0)), batch_size, shuffle=True):
+                self.optimizer.zero_grad()
 
-            input_feat = self.create_input_feat(data)
-            h = self.encoder(input_feat, data.adj_t)
-            pos_edge = pos_train_edge[perm].t()
-            neg_edge = torch.reshape(neg_train_edge[perm], (-1, 2)).t()
+                input_feat = self.create_input_feat(data)
+                h = self.encoder(input_feat, data.adj_t)
+                
+                pos_edge = pos_train_edge[perm].t()
+                neg_edge = torch.reshape(neg_train_edge[perm], (-1, 2)).t()
 
-            pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]])
-            neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]])
+                # ==============================================================
+                # O MOTOR DINÂMICO: Extração Justa de Dados para o Lote Atual
+                # ==============================================================
+                
+                # 1. A Heurística AA-DC (Calculada ao vivo para Verdadeiros e Falsos)
+                if self.use_heuristic:
+                    # Utilizamos a função get_batch_aadc (que criámos no utils.py)
+                    pos_aadc = get_batch_aadc(data.aadc_matrix, pos_edge).to(self.device)
+                    neg_aadc = get_batch_aadc(data.aadc_matrix, neg_edge).to(self.device)
+                else:
+                    pos_aadc = None
+                    neg_aadc = None
 
-            weight_margin = edge_weight_margin[perm] if edge_weight_margin is not None else None
+                # 2. O Tempo Contínuo (Bochner)
+                if self.use_temporal:
+                    ano_base = 2019 # O limite do OGB Collab
+                    
+                    # Delta-T para as colaborações reais
+                    pos_anos = split_edge['train']['year'][perm].to(self.device)
+                    pos_dt = (ano_base - pos_anos).view(-1, 1).float()
+                    
+                    # Delta-T para os falsos negativos (Avaliados no momento presente da rede)
+                    neg_dt = (ano_base - 2019) * torch.ones_like(neg_edge[0]).view(-1, 1).float()
+                    neg_dt = neg_dt.to(self.device)
+                else:
+                    pos_dt = None
+                    neg_dt = None
 
-            loss = self.calculate_loss(pos_out, neg_out, num_neg, margin=weight_margin)
-            loss.backward()
+                # ==============================================================
+                # A CHAMADA AO PREDITOR (Sem leakage de dados)
+                # ==============================================================
+                if self.use_temporal or self.use_heuristic:
+                    # Os dados entram no forward da classe AblationPredictor aqui!
+                    pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]], edge_dt=pos_dt, edge_aadc=pos_aadc)
+                    neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]], edge_dt=neg_dt, edge_aadc=neg_aadc)
+                else:
+                    pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]])
+                    neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]])
 
-            if self.clip_norm >= 0:
-                torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.clip_norm)
-                torch.nn.utils.clip_grad_norm_(self.predictor.parameters(), self.clip_norm)
+                # (O resto da função continua igual: cálculo da loss, backward, step)
+                weight_margin = edge_weight_margin[perm] if edge_weight_margin is not None else None
 
-            self.optimizer.step()
+                loss = self.calculate_loss(pos_out, neg_out, num_neg, margin=weight_margin)
+                loss.backward()
 
-            num_examples = pos_out.size(0)
-            total_loss += loss.item() * num_examples
-            total_examples += num_examples
+                if self.clip_norm >= 0:
+                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.clip_norm)
+                    torch.nn.utils.clip_grad_norm_(self.predictor.parameters(), self.clip_norm)
 
-        return total_loss / total_examples
+                self.optimizer.step()
+
+                num_examples = pos_out.size(0)
+                total_loss += loss.item() * num_examples
+                total_examples += num_examples
+
+            return total_loss / total_examples
 
     @torch.no_grad()
-    def batch_predict(self, h, edges, batch_size):
+    # [CIRURGIA ABLAÇÃO: ARGS DO BATCH_PREDICT] 
+    def batch_predict(self, h, edges, batch_size, edge_times=None, edge_aadcs=None):
         preds = []
         for perm in DataLoader(range(edges.size(0)), batch_size):
             edge = edges[perm].t()
-            preds += [self.predictor(h[edge[0]], h[edge[1]]).squeeze().cpu()]
+            
+            dt_batch = edge_times[perm].to(self.device) if edge_times is not None else None
+            aadc_batch = edge_aadcs[perm].to(self.device) if edge_aadcs is not None else None
+            
+            if self.use_temporal or self.use_heuristic:
+                preds += [self.predictor(h[edge[0]], h[edge[1]], edge_dt=dt_batch, edge_aadc=aadc_batch).squeeze().cpu()]
+            else:
+                preds += [self.predictor(h[edge[0]], h[edge[1]]).squeeze().cpu()]
+                
         pred = torch.cat(preds, dim=0)
         return pred
 
@@ -188,8 +281,7 @@ class BaseModel(object):
 
         input_feat = self.create_input_feat(data)
         h = self.encoder(input_feat, data.adj_t)
-        # The default index of unseen nodes is -1,
-        # hidden representations of unseen nodes is the average of all seen node representations
+        
         mean_h = torch.mean(h, dim=0, keepdim=True)
         h = torch.cat([h, mean_h], dim=0)
 
@@ -198,32 +290,46 @@ class BaseModel(object):
         pos_valid_edge, neg_valid_edge = pos_valid_edge.to(self.device), neg_valid_edge.to(self.device)
         pos_test_edge, neg_test_edge = pos_test_edge.to(self.device), neg_test_edge.to(self.device)
 
-        pos_valid_pred = self.batch_predict(h, pos_valid_edge, batch_size)
-        neg_valid_pred = self.batch_predict(h, neg_valid_edge, batch_size)
+        # [CIRURGIA ABLAÇÃO: TESTE] Busca os dados de tempo e heurística para validação/teste
+        v_pos_dt = split_edge['valid'].get('time')
+        v_pos_aadc = split_edge['valid'].get('aadc')
+        v_neg_dt = split_edge['valid'].get('neg_time')
+        v_neg_aadc = split_edge['valid'].get('neg_aadc')
+        
+        t_pos_dt = split_edge['test'].get('time')
+        t_pos_aadc = split_edge['test'].get('aadc')
+        t_neg_dt = split_edge['test'].get('neg_time')
+        t_neg_aadc = split_edge['test'].get('neg_aadc')
 
+        pos_valid_pred = self.batch_predict(h, pos_valid_edge, batch_size, edge_times=v_pos_dt, edge_aadcs=v_pos_aadc)
+        neg_valid_pred = self.batch_predict(h, neg_valid_edge, batch_size, edge_times=v_neg_dt, edge_aadcs=v_neg_aadc)
+
+        # Re-encode para o teste (padrão do OGB)
         h = self.encoder(input_feat, data.adj_t)
         mean_h = torch.mean(h, dim=0, keepdim=True)
         h = torch.cat([h, mean_h], dim=0)
 
-        pos_test_pred = self.batch_predict(h, pos_test_edge, batch_size)
-        neg_test_pred = self.batch_predict(h, neg_test_edge, batch_size)
+        pos_test_pred = self.batch_predict(h, pos_test_edge, batch_size, edge_times=t_pos_dt, edge_aadcs=t_pos_aadc)
+        neg_test_pred = self.batch_predict(h, neg_test_edge, batch_size, edge_times=t_neg_dt, edge_aadcs=t_neg_aadc)
 
         if eval_metric == 'hits':
-            results = evaluate_hits(
-                evaluator,
-                pos_valid_pred,
-                neg_valid_pred,
-                pos_test_pred,
-                neg_test_pred)
+            results = evaluate_hits(evaluator, pos_valid_pred, neg_valid_pred, pos_test_pred, neg_test_pred)
         else:
-            results = evaluate_mrr(
-                evaluator,
-                pos_valid_pred,
-                neg_valid_pred,
-                pos_test_pred,
-                neg_test_pred)
+            results = evaluate_mrr(evaluator, pos_valid_pred, neg_valid_pred, pos_test_pred, neg_test_pred)
 
         return results
+
+
+def adjust_lr(optimizer, progress, base_lr):
+    """Adjust learning rate based on progress (0.0 -> 1.0).
+    Simple linear decay: new_lr = base_lr * (1 - progress).
+    Updates optimizer in-place and returns new_lr.
+    """
+    progress = max(0.0, min(1.0, float(progress)))
+    new_lr = base_lr * (1.0 - progress)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = new_lr
+    return new_lr
 
 
 def create_input_layer(num_nodes, num_node_feats, hidden_channels, use_node_feats=True,
@@ -250,37 +356,30 @@ def create_input_layer(num_nodes, num_node_feats, hidden_channels, use_node_feat
 
 
 def create_gnn_layer(input_channels, hidden_channels, num_layers, dropout=0, encoder_name='SAGE'):
+    # [CIRURGIA ABLAÇÃO: ESPACIAL] Adicionado o suporte ao módulo INCEPTION
     if encoder_name.upper() == 'GCN':
         return GCN(input_channels, hidden_channels, hidden_channels, num_layers, dropout)
     elif encoder_name.upper() == 'WSAGE':
         return WSAGE(input_channels, hidden_channels, hidden_channels, num_layers, dropout)
     elif encoder_name.upper() == 'TRANSFORMER':
         return Transformer(input_channels, hidden_channels, hidden_channels, num_layers, dropout)
+    elif encoder_name.upper() == 'INCEPTION':
+        return InceptionGNN(input_channels, hidden_channels, num_layers, dropout) # <- Vamos criar no layer.py!
     else:
         return SAGE(input_channels, hidden_channels, hidden_channels, num_layers, dropout)
 
 
-def create_predictor_layer(hidden_channels, num_layers, dropout=0, predictor_name='MLP'):
+def create_predictor_layer(input_channels, hidden_channels, num_layers, dropout=0, predictor_name='MLP'):
     predictor_name = predictor_name.upper()
     if predictor_name == 'DOT':
         return DotPredictor()
     elif predictor_name == 'BIL':
         return BilinearPredictor(hidden_channels)
     elif predictor_name == 'MLP':
-        return MLPPredictor(hidden_channels, hidden_channels, 1, num_layers, dropout)
+        return MLPPredictor(input_channels, hidden_channels, 1, num_layers, dropout)
     elif predictor_name == 'MLPDOT':
-        return MLPDotPredictor(hidden_channels, 1, num_layers, dropout)
+        return MLPDotPredictor(input_channels, 1, num_layers, dropout)
     elif predictor_name == 'MLPBIL':
-        return MLPBilPredictor(hidden_channels, 1, num_layers, dropout)
+        return MLPBilPredictor(input_channels, 1, num_layers, dropout)
     elif predictor_name == 'MLPCAT':
-        return MLPCatPredictor(hidden_channels, hidden_channels, 1, num_layers, dropout)
-
-
-def adjust_lr(optimizer, decay_ratio, lr):
-    lr_ = lr * (1 - decay_ratio)
-    lr_min = lr * 0.0001
-    if lr_ < lr_min:
-        lr_ = lr_min
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr_
-    return lr_
+        return MLPCatPredictor(input_channels, hidden_channels, 1, num_layers, dropout)

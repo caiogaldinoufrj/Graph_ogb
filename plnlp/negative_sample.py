@@ -75,3 +75,51 @@ def sample_perm_copy(edge_index, target_num_sample, num_perm_copy):
     return torch.reshape(torch.stack(
         (src, dst), dim=-1), (-1, num_perm_copy, 2))
 
+# =======================================================================
+# [CIRURGIA ABLAÇÃO: DESAFIO] Amostrador Adversarial (Falsos Difíceis)
+# =======================================================================
+def adversarial_neg_sample(pos_edges_index, num_nodes, num_samples, num_neg, 
+                           adversarial_scores=None, method='sparse'):
+    """
+    Amostrador Adversarial para Link Prediction.
+    Em vez de sortear coautores completamente aleatórios (que a rede acha muito fácil dizer 'não'),
+    este amostrador busca pares que não têm arestas, mas possuem alta similaridade semântica/estrutural.
+    """
+    # Passo 1: Como baseline (ou se o gerador falhar), criamos amostras candidatas globais
+    new_edge_index, _ = add_self_loops(pos_edges_index)
+    
+    # Geramos uma piscina de candidatos 10x maior para podermos filtrar os mais "difíceis"
+    pool_size = num_samples * num_neg * 10 
+    candidate_neg_edges = negative_sampling(new_edge_index, num_nodes=num_nodes,
+                                            num_neg_samples=pool_size, method=method)
+    
+    neg_src = candidate_neg_edges[0]
+    neg_dst = candidate_neg_edges[1]
+    
+    # Passo 2: A Injeção da sua Lógica Adversarial
+    # AQUI ENTRA O SEU CÓDIGO (Heurística, Cosseno, ou Gerador de Rede Neural)
+    if adversarial_scores is not None:
+        # Se você passou um modelo gerador, ele dá notas para os candidatos.
+        # Nós pegamos os top-K candidatos que receberam as notas mais altas (os mais difíceis de desmascarar)
+        scores = adversarial_scores(neg_src, neg_dst)
+        _, hard_indices = torch.topk(scores, num_samples * num_neg)
+        
+        final_neg_src = neg_src[hard_indices]
+        final_neg_dst = neg_dst[hard_indices]
+    else:
+        # PLACEHOLDER: Caso você rode sem passar o tensor de scores, ele faz um fallback seguro.
+        # Cole a sua lógica nativa de cosseno aqui dentro!
+        final_neg_src = neg_src[:num_samples * num_neg]
+        final_neg_dst = neg_dst[:num_samples * num_neg]
+
+    # Passo 3: Garantia de Tamanho (Proteção contra tensores quebrados)
+    if final_neg_src.size(0) < num_samples * num_neg:
+        k = num_samples * num_neg - final_neg_src.size(0)
+        rand_index = torch.randperm(final_neg_src.size(0))[:k]
+        final_neg_src = torch.cat((final_neg_src, final_neg_src[rand_index]))
+        final_neg_dst = torch.cat((final_neg_dst, final_neg_dst[rand_index]))
+
+    # Retorna exatamente no formato que a Pairwise Loss exige: [batch, num_neg, 2]
+    return torch.reshape(torch.stack((final_neg_src, final_neg_dst), dim=-1), 
+                         (-1, num_neg, 2))
+# =======================================================================
