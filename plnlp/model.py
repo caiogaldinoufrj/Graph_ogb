@@ -114,7 +114,8 @@ class BaseModel(object):
                                                use_temporal=self.use_temporal,
                                                use_heuristic=self.use_heuristic).to(device)
         else:
-            self.predictor = create_predictor_layer(hidden_channels=mlp_hidden_channels,
+            self.predictor = create_predictor_layer(input_channels=gnn_hidden_channels,
+                                                    hidden_channels=mlp_hidden_channels,
                                                     num_layers=mlp_num_layers,
                                                     dropout=dropout,
                                                     predictor_name=predictor_name).to(device)
@@ -290,16 +291,36 @@ class BaseModel(object):
         pos_valid_edge, neg_valid_edge = pos_valid_edge.to(self.device), neg_valid_edge.to(self.device)
         pos_test_edge, neg_test_edge = pos_test_edge.to(self.device), neg_test_edge.to(self.device)
 
-        # [CIRURGIA ABLAÇÃO: TESTE] Busca os dados de tempo e heurística para validação/teste
-        v_pos_dt = split_edge['valid'].get('time')
-        v_pos_aadc = split_edge['valid'].get('aadc')
-        v_neg_dt = split_edge['valid'].get('neg_time')
-        v_neg_aadc = split_edge['valid'].get('neg_aadc')
-        
-        t_pos_dt = split_edge['test'].get('time')
-        t_pos_aadc = split_edge['test'].get('aadc')
-        t_neg_dt = split_edge['test'].get('neg_time')
-        t_neg_aadc = split_edge['test'].get('neg_aadc')
+        # [CIRURGIA ABLAÇÃO: TESTE DINÂMICO] Busca os dados de tempo e heurística em tempo real!
+        ano_base = 2019
+
+        # --- TEMPO (Bochner) ---
+        if self.use_temporal:
+            # Validação
+            if 'year' in split_edge['valid']:
+                v_pos_dt = (ano_base - split_edge['valid']['year']).view(-1, 1).float()
+            else:
+                v_pos_dt = torch.zeros(pos_valid_edge.size(0), 1).float()
+            v_neg_dt = torch.zeros(neg_valid_edge.size(0), 1).float()
+
+            # Teste
+            if 'year' in split_edge['test']:
+                t_pos_dt = (ano_base - split_edge['test']['year']).view(-1, 1).float()
+            else:
+                t_pos_dt = torch.zeros(pos_test_edge.size(0), 1).float()
+            t_neg_dt = torch.zeros(neg_test_edge.size(0), 1).float()
+        else:
+            v_pos_dt = v_neg_dt = t_pos_dt = t_neg_dt = None
+
+        # --- HEURÍSTICA (AA-DC) ---
+        if self.use_heuristic:
+            # pos_valid_edge.t() converte de [N, 2] para [2, N] que o nosso get_batch_aadc precisa
+            v_pos_aadc = get_batch_aadc(data.aadc_matrix, pos_valid_edge.t())
+            v_neg_aadc = get_batch_aadc(data.aadc_matrix, neg_valid_edge.t())
+            t_pos_aadc = get_batch_aadc(data.aadc_matrix, pos_test_edge.t())
+            t_neg_aadc = get_batch_aadc(data.aadc_matrix, neg_test_edge.t())
+        else:
+            v_pos_aadc = v_neg_aadc = t_pos_aadc = t_neg_aadc = None
 
         pos_valid_pred = self.batch_predict(h, pos_valid_edge, batch_size, edge_times=v_pos_dt, edge_aadcs=v_pos_aadc)
         neg_valid_pred = self.batch_predict(h, neg_valid_edge, batch_size, edge_times=v_neg_dt, edge_aadcs=v_neg_aadc)

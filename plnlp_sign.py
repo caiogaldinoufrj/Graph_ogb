@@ -4,6 +4,14 @@ import time
 import os
 
 import torch
+_original_torch_load = torch.load
+
+def _patched_torch_load(*args, **kwargs):
+    if 'weights_only' not in kwargs:
+        kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+
+torch.load = _patched_torch_load
 import torch_geometric.transforms as T
 from torch_geometric.utils import to_undirected
 from torch_sparse import coalesce, SparseTensor
@@ -40,26 +48,26 @@ def argument():
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--num_neg', type=int, default=1)
     parser.add_argument('--walk_length', type=int, default=5)
-    parser.add_argument('--epochs', type=int, default=500)
+    parser.add_argument('--epochs', type=int, default=800)
     parser.add_argument('--log_steps', type=int, default=1)
     parser.add_argument('--eval_steps', type=int, default=5)
     parser.add_argument('--runs', type=int, default=10)
     parser.add_argument('--year', type=int, default=-1)
     parser.add_argument('--device', type=int, default=0)
-    parser.add_argument('--use_lr_decay', type=str2bool, default=False)
+    parser.add_argument('--use_lr_decay', type=str2bool, default=True)
     parser.add_argument('--use_node_feats', type=str2bool, default=False)
     parser.add_argument('--use_coalesce', type=str2bool, default=False)
     parser.add_argument('--train_node_emb', type=str2bool, default=True)
-    parser.add_argument('--train_on_subgraph', type=str2bool, default=False)
-    parser.add_argument('--use_valedges_as_input', type=str2bool, default=False)
+    parser.add_argument('--train_on_subgraph', type=str2bool, default=True)
+    parser.add_argument('--use_valedges_as_input', type=str2bool, default=True)
     parser.add_argument('--eval_last_best', type=str2bool, default=False)
     parser.add_argument('--random_walk_augment', type=str2bool, default=False)
     
     # ==========================================================
     # [CIRURGIA ABLAÇÃO: PAINEL DE CONTROLE DAS DIMENSÕES]
     # ==========================================================
-    parser.add_argument('--spatial_mode', type=str, default='base', help="Opções: 'base', 'sign', 'inception'")
-    parser.add_argument('--use_temporal', type=str2bool, default=False, help="Ativa a codificação de Bochner")
+    parser.add_argument('--spatial_mode', type=str, default='sign', help="Opções: 'base', 'sign', 'inception'")
+    parser.add_argument('--use_temporal', type=str2bool, default=True, help="Ativa a codificação de Bochner")
     parser.add_argument('--use_heuristic', type=str2bool, default=False, help="Injeta a heurística AA-DC no preditor")
     # Nota: a flag do amostrador adversarial já existe acima como '--neg_sampler adversarial'
     
@@ -133,6 +141,7 @@ def main():
             data.x = torch.cat(xs, dim=-1)
             
         data.x = data.x.to(torch.float)
+        num_node_feats = data.x.shape[1]
 
     if args.spatial_mode.lower() == 'inception':
         print(">>> Ativando Propagação Dinâmica (Módulo Inception)...")
@@ -306,23 +315,32 @@ def main():
 
                 if epoch % args.log_steps == 0:
                     spent_time = time.time() - start_time
-                    for key, result in results.items():
-                        valid_res, test_res = result
+                    if epoch % args.eval_steps == 0:
+                        for key, result in results.items():
+                            valid_res, test_res = result
+                            to_print = (f'Run: {run + 1:02d}, '
+                                        f'Epoch: {epoch:02d}, '
+                                        f'Loss: {loss:.4f}, '
+                                        f'Learning Rate: {cur_lr:.4f}, '
+                                        f'Valid: {100 * valid_res:.2f}%, '
+                                        f'Test: {100 * test_res:.2f}%')
+                            print(key)
+                            print(to_print)
+                            with open(log_file, 'a') as f:
+                                print(key, file=f)
+                                print(to_print, file=f)
+                        print('---')
+                        print(f'Training Time Per Epoch: {spent_time / args.eval_steps: .4f} s')
+                        print('---')
+                        start_time = time.time()
+                    else:
                         to_print = (f'Run: {run + 1:02d}, '
                                     f'Epoch: {epoch:02d}, '
                                     f'Loss: {loss:.4f}, '
-                                    f'Learning Rate: {cur_lr:.4f}, '
-                                    f'Valid: {100 * valid_res:.2f}%, '
-                                    f'Test: {100 * test_res:.2f}%')
-                        print(key)
+                                    f'Learning Rate: {cur_lr:.4f}')
                         print(to_print)
                         with open(log_file, 'a') as f:
-                            print(key, file=f)
                             print(to_print, file=f)
-                    print('---')
-                    print(f'Training Time Per Epoch: {spent_time / args.eval_steps: .4f} s')
-                    print('---')
-                    start_time = time.time()
 
             if args.use_lr_decay:
                 cur_lr = adjust_lr(model.optimizer,

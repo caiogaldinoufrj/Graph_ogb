@@ -151,6 +151,11 @@ def precompute_aadc_matrix(adj_t):
     
     # A matriz AA é literalmente A multiplicada pela A ponderada
     aadc_matrix = adj_t.matmul(adj_w.t())
+    try:
+        a_row, a_col, a_val = aadc_matrix.coo()
+        aadc_matrix._aadc_mapping = {(int(r), int(c)): float(v) for r, c, v in zip(a_row.tolist(), a_col.tolist(), a_val.tolist())}
+    except Exception:
+        aadc_matrix._aadc_mapping = None
     return aadc_matrix
 
 def get_batch_aadc(aadc_matrix, edge_index):
@@ -160,6 +165,11 @@ def get_batch_aadc(aadc_matrix, edge_index):
     # Se aadc_matrix for muito densa, essa operação requer cuidado, 
     # mas para o collab, é bem esparso.
     
+    # Usa um lookup em memória se já tivermos o dicionário precalculado.
+    mapping = getattr(aadc_matrix, '_aadc_mapping', None)
+    if mapping is not None:
+        return torch.tensor([mapping.get((int(u), int(v)), 0.0) for u, v in zip(row.tolist(), col.tolist())], dtype=torch.float)
+
     # Obter os scores via SparseTensor pode exigir converter para COO momentaneamente
     # ou usar a função get_value se disponível. Uma abordagem segura e rápida:
     out = []
