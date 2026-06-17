@@ -12,28 +12,30 @@ def _patched_torch_load(*args, **kwargs):
     return _original_torch_load(*args, **kwargs)
 
 torch.load = _patched_torch_load
+
 import torch_geometric.transforms as T
 from torch_geometric.utils import to_undirected
 from torch_sparse import coalesce, SparseTensor
 from ogb.linkproppred import PygLinkPropPredDataset, Evaluator
+from torch_geometric.transforms import SIGN
+
 from plnlp.logger import Logger
 from plnlp.model import BaseModel, adjust_lr
-from plnlp.utils import gcn_normalization, adj_normalization
-from torch_geometric.transforms import SIGN
+from plnlp.utils import gcn_normalization, adj_normalization, precompute_aadc_matrix
 
 def argument():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--encoder', type=str, default='SAGE')
+    parser.add_argument('--encoder', type=str, default='INCEPTION')
     parser.add_argument('--predictor', type=str, default='MLP')
     parser.add_argument('--optimizer', type=str, default='Adam')
     parser.add_argument('--loss_func', type=str, default='AUC')
-    parser.add_argument('--neg_sampler', type=str, default='global')
-    parser.add_argument('--data_name', type=str, default='ogbl-ddi')
+    parser.add_argument('--neg_sampler', type=str, default='adversial')
+    parser.add_argument('--data_name', type=str, default='ogbl-collab')
     parser.add_argument('--data_path', type=str, default='dataset')
     parser.add_argument('--eval_metric', type=str, default='hits')
     parser.add_argument('--walk_start_type', type=str, default='edge')
     parser.add_argument('--res_dir', type=str, default='')
-    parser.add_argument('--save_dir', type=str, default='', help='Directory to save checkpoints and logs')
+    parser.add_argument('--save_dir', type=str, default='ablation/all', help='Directory to save checkpoints and logs')
     parser.add_argument('--save_checkpoints', type=str2bool, default=True, help='Save model checkpoints during training')
     parser.add_argument('--checkpoint_metric', type=str, default='', help="Metric used to save the best checkpoint. Defaults to 'Hits@50' for hits and 'MRR' for mrr")
     parser.add_argument('--pretrain_emb', type=str, default='')
@@ -42,33 +44,33 @@ def argument():
     parser.add_argument('--emb_hidden_channels', type=int, default=256)
     parser.add_argument('--gnn_hidden_channels', type=int, default=256)
     parser.add_argument('--mlp_hidden_channels', type=int, default=256)
-    parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--grad_clip_norm', type=float, default=2.0)
+    parser.add_argument('--dropout', type=float, default=0.2)
+    parser.add_argument('--grad_clip_norm', type=float, default=1.0)
     parser.add_argument('--batch_size', type=int, default=64 * 1024)
-    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--lr', type=float, default=0.002)
     parser.add_argument('--num_neg', type=int, default=1)
     parser.add_argument('--walk_length', type=int, default=5)
     parser.add_argument('--epochs', type=int, default=800)
     parser.add_argument('--log_steps', type=int, default=1)
     parser.add_argument('--eval_steps', type=int, default=5)
     parser.add_argument('--runs', type=int, default=10)
-    parser.add_argument('--year', type=int, default=-1)
+    parser.add_argument('--year', type=int, default=2010)
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--use_lr_decay', type=str2bool, default=True)
-    parser.add_argument('--use_node_feats', type=str2bool, default=False)
+    parser.add_argument('--use_node_feats', type=str2bool, default=True)
     parser.add_argument('--use_coalesce', type=str2bool, default=False)
     parser.add_argument('--train_node_emb', type=str2bool, default=True)
-    parser.add_argument('--train_on_subgraph', type=str2bool, default=True)
-    parser.add_argument('--use_valedges_as_input', type=str2bool, default=True)
+    parser.add_argument('--train_on_subgraph', type=str2bool, default=False)
+    parser.add_argument('--use_valedges_as_input', type=str2bool, default=False)
     parser.add_argument('--eval_last_best', type=str2bool, default=False)
     parser.add_argument('--random_walk_augment', type=str2bool, default=False)
     
     # ==========================================================
     # [CIRURGIA ABLAÇÃO: PAINEL DE CONTROLE DAS DIMENSÕES]
     # ==========================================================
-    parser.add_argument('--spatial_mode', type=str, default='sign', help="Opções: 'base', 'sign', 'inception'")
+    parser.add_argument('--spatial_mode', type=str, default='inception', help="Opções: 'base', 'sign', 'inception'")
     parser.add_argument('--use_temporal', type=str2bool, default=True, help="Ativa a codificação de Bochner")
-    parser.add_argument('--use_heuristic', type=str2bool, default=False, help="Injeta a heurística AA-DC no preditor")
+    parser.add_argument('--use_heuristic', type=str2bool, default=True, help="Injeta a heurística AA-DC no preditor")
     # Nota: a flag do amostrador adversarial já existe acima como '--neg_sampler adversarial'
     
     args = parser.parse_args()
@@ -205,12 +207,11 @@ def main():
 
     data = data.to(device)
 
-# ==========================================================
+    # ==========================================================
     # [REVISÃO ABLAÇÃO: INICIALIZAÇÃO DA MATRIZ HEURÍSTICA]
     # ==========================================================
     if args.use_heuristic:
         print(">>> Pré-calculando a Matriz Global de AA-DC... (Isso pode demorar um pouco)")
-        from plnlp.utils import precompute_aadc_matrix
         
         # Guardamos a matriz dentro do objeto 'data' para o model.py ter acesso rápido
         data.aadc_matrix = precompute_aadc_matrix(data.adj_t)

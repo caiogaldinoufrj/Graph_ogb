@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 import torch
 import numpy as np
-from plnlp.negative_sample import global_neg_sample, global_perm_neg_sample, local_neg_sample
+from plnlp.negative_sample import global_neg_sample, global_perm_neg_sample, local_neg_sample, adversarial_neg_sample
 from torch_sparse import SparseTensor
 
 
-def get_pos_neg_edges(split, split_edge, edge_index=None, num_nodes=None, neg_sampler_name=None, num_neg=None):
-    if 'edge' in split_edge['train']:
-        pos_edge = split_edge[split]['edge']
-    elif 'source_node' in split_edge['train']:
-        source = split_edge[split]['source_node']
-        target = split_edge[split]['target_node']
-        pos_edge = torch.stack([source, target]).t()
-
+def get_pos_neg_edges(split, split_edge, edge_index, num_nodes,
+                      neg_sampler_name, num_neg, node_feats=None):
+    
+    pos_edge = split_edge[split]['edge']
     if split == 'train':
         if neg_sampler_name == 'local':
             neg_edge = local_neg_sample(
@@ -25,32 +21,31 @@ def get_pos_neg_edges(split, split_edge, edge_index=None, num_nodes=None, neg_sa
                 num_nodes=num_nodes,
                 num_samples=pos_edge.size(0),
                 num_neg=num_neg)
-            
-        # [CIRURGIA ABLAÇÃO: CORRIGIDO]
         elif neg_sampler_name == 'adversarial':
-            from plnlp.negative_sample import adversarial_neg_sample
             neg_edge = adversarial_neg_sample(
-                edge_index, 
-                num_nodes=num_nodes, 
-                num_samples=pos_edge.size(0), # Correção: mapeado dinamicamente
-                num_neg=num_neg
-            )
-            
+                edge_index,
+                num_nodes=num_nodes,
+                num_samples=pos_edge.size(0),
+                num_neg=num_neg,
+                node_feats=node_feats)
         else:
             neg_edge = global_perm_neg_sample(
                 edge_index,
                 num_nodes=num_nodes,
                 num_samples=pos_edge.size(0),
                 num_neg=num_neg)
-   
+    
     else:
-        if 'edge' in split_edge['train']:
+        # CORREÇÃO: Verificando a chave correta e extraindo o 'source' se necessário
+        if 'edge' in split_edge[split]:
             neg_edge = split_edge[split]['edge_neg']
-        elif 'source_node' in split_edge['train']:
+        elif 'source_node' in split_edge[split]:
+            source = split_edge[split]['source_node']
             target_neg = split_edge[split]['target_node_neg']
             neg_per_target = target_neg.size(1)
             neg_edge = torch.stack([source.repeat_interleave(neg_per_target),
                                     target_neg.view(-1)]).t()
+            
     return pos_edge, neg_edge
 
 

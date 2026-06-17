@@ -71,59 +71,86 @@ class InceptionGNN(torch.nn.Module):
         super(InceptionGNN, self).__init__()
         self.dropout = dropout
         
-        # Como o Inception tem saltos fixos, nós definimos a topologia manualmente
-        # Canal A: 1 Salto (Vizinhos diretos)
+        # Canal A: 1 Salto
         self.branch1_conv = SAGEConv(in_channels, hidden_channels)
+        self.branch1_norm = torch.nn.LayerNorm(hidden_channels)
         
-        # Canal B: 2 Saltos (Amigos dos amigos)
+        # Canal B: 2 Saltos
         self.branch2_conv1 = SAGEConv(in_channels, hidden_channels)
+        self.branch2_norm1 = torch.nn.LayerNorm(hidden_channels)
         self.branch2_conv2 = SAGEConv(hidden_channels, hidden_channels)
+        self.branch2_norm2 = torch.nn.LayerNorm(hidden_channels)
         
-        # Canal C: 3 Saltos (Comunidade expandida)
+        # Canal C: 3 Saltos
         self.branch3_conv1 = SAGEConv(in_channels, hidden_channels)
+        self.branch3_norm1 = torch.nn.LayerNorm(hidden_channels)
         self.branch3_conv2 = SAGEConv(hidden_channels, hidden_channels)
+        self.branch3_norm2 = torch.nn.LayerNorm(hidden_channels)
         self.branch3_conv3 = SAGEConv(hidden_channels, hidden_channels)
+        self.branch3_norm3 = torch.nn.LayerNorm(hidden_channels)
         
-        # O Fuso de Concatenamento: Reduz a soma dos canais de volta para a dimensão esperada
+        # Fuso de Concatenamento
         self.project = torch.nn.Linear(3 * hidden_channels, hidden_channels)
+        self.project_norm = torch.nn.LayerNorm(hidden_channels)
 
     def reset_parameters(self):
         self.branch1_conv.reset_parameters()
+        self.branch1_norm.reset_parameters()
+        
         self.branch2_conv1.reset_parameters()
+        self.branch2_norm1.reset_parameters()
         self.branch2_conv2.reset_parameters()
+        self.branch2_norm2.reset_parameters()
+        
         self.branch3_conv1.reset_parameters()
+        self.branch3_norm1.reset_parameters()
         self.branch3_conv2.reset_parameters()
+        self.branch3_norm2.reset_parameters()
         self.branch3_conv3.reset_parameters()
+        self.branch3_norm3.reset_parameters()
+        
         self.project.reset_parameters()
+        self.project_norm.reset_parameters()
 
     def forward(self, x, adj_t):
         # Fluxo Paralelo A: 1-hop
         h1 = self.branch1_conv(x, adj_t)
+        h1 = self.branch1_norm(h1)
         h1 = F.relu(h1)
         h1 = F.dropout(h1, p=self.dropout, training=self.training)
         
         # Fluxo Paralelo B: 2-hops
         h2 = self.branch2_conv1(x, adj_t)
+        h2 = self.branch2_norm1(h2)
         h2 = F.relu(h2)
         h2 = F.dropout(h2, p=self.dropout, training=self.training)
+        
         h2 = self.branch2_conv2(h2, adj_t)
+        h2 = self.branch2_norm2(h2)
         h2 = F.relu(h2)
         h2 = F.dropout(h2, p=self.dropout, training=self.training)
         
         # Fluxo Paralelo C: 3-hops
         h3 = self.branch3_conv1(x, adj_t)
-        h3 = F.relu(h3)
-        h3 = F.dropout(h3, p=self.dropout, training=self.training)
-        h3 = self.branch3_conv2(h3, adj_t)
-        h3 = F.relu(h3)
-        h3 = F.dropout(h3, p=self.dropout, training=self.training)
-        h3 = self.branch3_conv3(h3, adj_t)
+        h3 = self.branch3_norm1(h3)
         h3 = F.relu(h3)
         h3 = F.dropout(h3, p=self.dropout, training=self.training)
         
-        # A Mágica do Inception: Concatenar as perspectivas e fundir
+        h3 = self.branch3_conv2(h3, adj_t)
+        h3 = self.branch3_norm2(h3)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
+        
+        h3 = self.branch3_conv3(h3, adj_t)
+        h3 = self.branch3_norm3(h3)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
+        
+        # A Mágica do Inception
         out = torch.cat([h1, h2, h3], dim=-1)
         out = self.project(out)
+        out = self.project_norm(out) # Normaliza a fusão
+        out = F.relu(out)            # Aplica ativação final
         
         return out
 # =======================================================================
@@ -132,20 +159,29 @@ class MLPPredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
         super(MLPPredictor, self).__init__()
         self.lins = torch.nn.ModuleList()
+        self.norms = torch.nn.ModuleList() # <- Normalizadores
+        
         for i in range(num_layers):
             first_channels = in_channels if i == 0 else hidden_channels
             second_channels = out_channels if i == num_layers - 1 else hidden_channels
             self.lins.append(torch.nn.Linear(first_channels, second_channels))
+            
+            if i < num_layers - 1:
+                self.norms.append(torch.nn.LayerNorm(second_channels)) # <- Normalizadores
+                
         self.dropout = dropout
 
     def reset_parameters(self):
         for lin in self.lins:
             lin.reset_parameters()
+        for norm in self.norms:
+            norm.reset_parameters()
 
     def forward(self, x_i, x_j):
         x = x_i * x_j
-        for lin in self.lins[:-1]:
+        for i, lin in enumerate(self.lins[:-1]):
             x = lin(x)
+            x = self.norms[i](x) # <- Normaliza antes do ReLU
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lins[-1](x)
@@ -157,22 +193,34 @@ class MLPSinglePredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
         super(MLPSinglePredictor, self).__init__()
         self.lins = torch.nn.ModuleList()
+        self.norms = torch.nn.ModuleList() # <- Adicionamos os normalizadores aqui
+        
         for i in range(num_layers):
             first_channels = in_channels if i == 0 else hidden_channels
             second_channels = out_channels if i == num_layers - 1 else hidden_channels
             self.lins.append(torch.nn.Linear(first_channels, second_channels))
+            
+            # Adiciona LayerNorm para todas as camadas exceto a última
+            if i < num_layers - 1:
+                self.norms.append(torch.nn.LayerNorm(second_channels))
+                
         self.dropout = dropout
 
     def reset_parameters(self):
         for lin in self.lins:
             lin.reset_parameters()
+        for norm in self.norms:
+            norm.reset_parameters()
 
     def forward(self, x):
         # x is a single tensor [batch, in_channels]
-        for lin in self.lins[:-1]:
+        for i, lin in enumerate(self.lins[:-1]):
             x = lin(x)
+            x = self.norms[i](x) # <- Normaliza antes do ReLU
             x = F.relu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
+        
+        # A última camada NUNCA leva ReLU ou LayerNorm, ela cospe a probabilidade crua para a Loss
         x = self.lins[-1](x)
         return x
 

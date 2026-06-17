@@ -176,14 +176,24 @@ class BaseModel(object):
             self.encoder.train()
             self.predictor.train()
 
+            # Captura a melhor representação disponível para alimentar o amostrador adversarial
+            if self.use_node_feats:
+                feats_adv = data.x.to(self.device)
+            elif self.train_node_emb and self.emb is not None:
+                # Usa os próprios embeddings topológicos se as features textuais estiverem desligadas
+                feats_adv = self.emb.weight.to(self.device)
+            else:
+                feats_adv = None
+
             pos_train_edge, neg_train_edge = get_pos_neg_edges('train', split_edge,
-                                                            edge_index=data.edge_index,
-                                                            num_nodes=self.num_nodes,
-                                                            neg_sampler_name=neg_sampler_name,
-                                                            num_neg=num_neg)
+                                                                edge_index=data.edge_index,
+                                                                num_nodes=self.num_nodes,
+                                                                neg_sampler_name=neg_sampler_name,
+                                                                num_neg=num_neg,
+                                                                node_feats=feats_adv) # <-- Passamos a representação capturada
 
             pos_train_edge, neg_train_edge = pos_train_edge.to(self.device), neg_train_edge.to(self.device)
-
+            
             if 'weight' in split_edge['train']:
                 edge_weight_margin = split_edge['train']['weight'].to(self.device)
             else:
