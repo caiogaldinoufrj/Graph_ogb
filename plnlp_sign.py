@@ -63,7 +63,7 @@ def argument():
     parser.add_argument('--train_on_subgraph', type=str2bool, default=True)
     parser.add_argument('--use_valedges_as_input', type=str2bool, default=True)
     parser.add_argument('--eval_last_best', type=str2bool, default=True)
-    parser.add_argument('--random_walk_augment', type=str2bool, default=True)
+    parser.add_argument('--random_walk_augment', type=str2bool, default=False)
     
     # ==========================================================
     # [CIRURGIA ABLAÇÃO: PAINEL DE CONTROLE DAS DIMENSÕES]
