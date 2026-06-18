@@ -225,26 +225,27 @@ class BaseModel(object):
 
                 # 2. O Tempo Contínuo (Bochner)
                 # 2. O Tempo Contínuo (Bochner) - CORRIGIDO PARA EVITAR LEAKAGE
-                if self.use_temporal:
-                    ano_base = 2019 # O limite do OGB Collab
-                    
-                    # Delta-T para as colaborações reais (Treino)
-                    pos_anos = split_edge['train']['year'][perm].to(self.device)
-                    pos_dt = (ano_base - pos_anos).view(-1, 1).float()
-                    
-                    # [CORREÇÃO] Em vez de fixar em 2019, sorteamos um ano do passado
-                    # para os negativos, usando a distribuição do próprio treino.
-                    todos_anos = split_edge['train']['year'].to(self.device)
-                    
-                    # Sorteia anos aleatórios do conjunto de treino para os negativos
-                    idx_aleatorios = torch.randint(0, todos_anos.size(0), (neg_edge.size(1),), device=self.device)
-                    neg_anos_sorteados = todos_anos[idx_aleatorios]
-                    
-                    neg_dt = (ano_base - neg_anos_sorteados).view(-1, 1).float()
-                else:
-                    pos_dt = None
-                    neg_dt = None
-
+                # 2. O Tempo Contínuo (Bochner) - CORRIGIDO E DISPOSITIVO ASSEGURADO
+                    if self.use_temporal:
+                        ano_base = 2019
+                        
+                        # 1. Garante que os anos de treino estejam no mesmo dispositivo que o modelo
+                        todos_anos = split_edge['train']['year'].to(self.device)
+                        
+                        # 2. Positivo: cálculo direto
+                        pos_anos = split_edge['train']['year'][perm].to(self.device)
+                        pos_dt = (ano_base - pos_anos).view(-1, 1).float()
+                        
+                        # 3. Negativo: Sorteio seguro na GPU
+                        # Usamos o tamanho correto (neg_edge.size(1)) e garantimos o dispositivo
+                        num_neg_edges = neg_edge.size(1)
+                        idx_aleatorios = torch.randint(0, todos_anos.size(0), (num_neg_edges,), device=self.device)
+                        neg_anos_sorteados = todos_anos[idx_aleatorios]
+                        
+                        neg_dt = (ano_base - neg_anos_sorteados).view(-1, 1).float()
+                    else:
+                        pos_dt = None
+                        neg_dt = None
                 # ==============================================================
                 # A CHAMADA AO PREDITOR (Sem leakage de dados)
                 # ==============================================================
