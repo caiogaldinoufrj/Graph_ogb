@@ -311,8 +311,12 @@ class BaseModel(object):
         mean_h = torch.mean(h, dim=0, keepdim=True)
         h = torch.cat([h, mean_h], dim=0)
 
-        pos_valid_edge, neg_valid_edge = get_pos_neg_edges('valid', split_edge)
-        pos_test_edge, neg_test_edge = get_pos_neg_edges('test', split_edge)
+        pos_valid_edge = split_edge['valid']['edge']
+        neg_valid_edge = split_edge['valid']['edge_neg']
+        
+        pos_test_edge = split_edge['test']['edge']
+        neg_test_edge = split_edge['test']['edge_neg']
+        
         pos_valid_edge, neg_valid_edge = pos_valid_edge.to(self.device), neg_valid_edge.to(self.device)
         pos_test_edge, neg_test_edge = pos_test_edge.to(self.device), neg_test_edge.to(self.device)
 
