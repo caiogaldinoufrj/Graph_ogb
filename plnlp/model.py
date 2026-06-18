@@ -224,16 +224,23 @@ class BaseModel(object):
                     neg_aadc = None
 
                 # 2. O Tempo Contínuo (Bochner)
+                # 2. O Tempo Contínuo (Bochner) - CORRIGIDO PARA EVITAR LEAKAGE
                 if self.use_temporal:
                     ano_base = 2019 # O limite do OGB Collab
                     
-                    # Delta-T para as colaborações reais
+                    # Delta-T para as colaborações reais (Treino)
                     pos_anos = split_edge['train']['year'][perm].to(self.device)
                     pos_dt = (ano_base - pos_anos).view(-1, 1).float()
                     
-                    # Delta-T para os falsos negativos (Avaliados no momento presente da rede)
-                    neg_dt = (ano_base - 2019) * torch.ones_like(neg_edge[0]).view(-1, 1).float()
-                    neg_dt = neg_dt.to(self.device)
+                    # [CORREÇÃO] Em vez de fixar em 2019, sorteamos um ano do passado
+                    # para os negativos, usando a distribuição do próprio treino.
+                    todos_anos = split_edge['train']['year'].to(self.device)
+                    
+                    # Sorteia anos aleatórios do conjunto de treino para os negativos
+                    idx_aleatorios = torch.randint(0, todos_anos.size(0), (neg_edge.size(1),), device=self.device)
+                    neg_anos_sorteados = todos_anos[idx_aleatorios]
+                    
+                    neg_dt = (ano_base - neg_anos_sorteados).view(-1, 1).float()
                 else:
                     pos_dt = None
                     neg_dt = None
@@ -305,20 +312,26 @@ class BaseModel(object):
         ano_base = 2019
 
         # --- TEMPO (Bochner) ---
+        # --- TEMPO (Bochner) NO TESTE ---
         if self.use_temporal:
+            # Calcula a média dos anos de treino para servir de baseline neutra
+            ano_medio_treino = split_edge['train']['year'].float().mean()
+            
             # Validação
             if 'year' in split_edge['valid']:
                 v_pos_dt = (ano_base - split_edge['valid']['year']).view(-1, 1).float()
             else:
                 v_pos_dt = torch.zeros(pos_valid_edge.size(0), 1).float()
-            v_neg_dt = torch.zeros(neg_valid_edge.size(0), 1).float()
+            
+            # Em vez de zeros, use o ano médio de treino para o negativo
+            v_neg_dt = (ano_base - ano_medio_treino) * torch.ones(neg_valid_edge.size(0), 1, device=self.device)
 
             # Teste
             if 'year' in split_edge['test']:
                 t_pos_dt = (ano_base - split_edge['test']['year']).view(-1, 1).float()
             else:
                 t_pos_dt = torch.zeros(pos_test_edge.size(0), 1).float()
-            t_neg_dt = torch.zeros(neg_test_edge.size(0), 1).float()
+            t_neg_dt = (ano_base - ano_medio_treino) * torch.ones(neg_test_edge.size(0), 1, device=self.device)
         else:
             v_pos_dt = v_neg_dt = t_pos_dt = t_neg_dt = None
 

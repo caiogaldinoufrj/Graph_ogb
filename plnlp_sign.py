@@ -26,9 +26,9 @@ from plnlp.utils import gcn_normalization, adj_normalization, precompute_aadc_ma
 def argument():
     parser = argparse.ArgumentParser()
     parser.add_argument('--encoder', type=str, default='INCEPTION')
-    parser.add_argument('--predictor', type=str, default='MLP')
+    parser.add_argument('--predictor', type=str, default='MLPCAT')
     parser.add_argument('--optimizer', type=str, default='Adam')
-    parser.add_argument('--loss_func', type=str, default='AUC')
+    parser.add_argument('--loss_func', type=str, default='LogRank')
     parser.add_argument('--neg_sampler', type=str, default='adversial')
     parser.add_argument('--data_name', type=str, default='ogbl-collab')
     parser.add_argument('--data_path', type=str, default='dataset')
@@ -60,10 +60,10 @@ def argument():
     parser.add_argument('--use_node_feats', type=str2bool, default=True)
     parser.add_argument('--use_coalesce', type=str2bool, default=False)
     parser.add_argument('--train_node_emb', type=str2bool, default=True)
-    parser.add_argument('--train_on_subgraph', type=str2bool, default=False)
-    parser.add_argument('--use_valedges_as_input', type=str2bool, default=False)
-    parser.add_argument('--eval_last_best', type=str2bool, default=False)
-    parser.add_argument('--random_walk_augment', type=str2bool, default=False)
+    parser.add_argument('--train_on_subgraph', type=str2bool, default=True)
+    parser.add_argument('--use_valedges_as_input', type=str2bool, default=True)
+    parser.add_argument('--eval_last_best', type=str2bool, default=True)
+    parser.add_argument('--random_walk_augment', type=str2bool, default=True)
     
     # ==========================================================
     # [CIRURGIA ABLAÇÃO: PAINEL DE CONTROLE DAS DIMENSÕES]
