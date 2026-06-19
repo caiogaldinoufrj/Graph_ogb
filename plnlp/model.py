@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 from plnlp.layer import *
 from plnlp.loss import *
 from plnlp.utils import *
+from torch_geometric.utils import dropout_adj
+from torch_sparse import SparseTensor
 
 # =======================================================================
 # [CIRURGIA ABLAÇÃO: TEMPORAL] Codificador de Bochner (Tempo Contínuo)
@@ -173,115 +175,124 @@ class BaseModel(object):
         return loss
 
     def train(self, data, split_edge, batch_size, neg_sampler_name, num_neg):
-            self.encoder.train()
-            self.predictor.train()
+        self.encoder.train()
+        self.predictor.train()
 
-            # Captura a melhor representação disponível para alimentar o amostrador adversarial
-            if self.use_node_feats:
-                feats_adv = data.x.to(self.device)
-            elif self.train_node_emb and self.emb is not None:
-                # Usa os próprios embeddings topológicos se as features textuais estiverem desligadas
-                feats_adv = self.emb.weight.to(self.device)
-            else:
-                feats_adv = None
+        # Captura a melhor representação disponível para alimentar o amostrador adversarial
+        if self.use_node_feats:
+            feats_adv = data.x.to(self.device)
+        elif self.train_node_emb and self.emb is not None:
+            # Usa os próprios embeddings topológicos se as features textuais estiverem desligadas
+            feats_adv = self.emb.weight.to(self.device)
+        else:
+            feats_adv = None
 
-            pos_train_edge, neg_train_edge = get_pos_neg_edges('train', split_edge,
-                                                                edge_index=data.edge_index,
-                                                                num_nodes=self.num_nodes,
-                                                                neg_sampler_name=neg_sampler_name,
-                                                                num_neg=num_neg,
-                                                                node_feats=feats_adv) # <-- Passamos a representação capturada
+        pos_train_edge, neg_train_edge = get_pos_neg_edges('train', split_edge,
+                                                           edge_index=data.edge_index,
+                                                           num_nodes=self.num_nodes,
+                                                           neg_sampler_name=neg_sampler_name,
+                                                           num_neg=num_neg,
+                                                           node_feats=feats_adv) # <-- Passamos a representação capturada
 
-            pos_train_edge, neg_train_edge = pos_train_edge.to(self.device), neg_train_edge.to(self.device)
+        pos_train_edge, neg_train_edge = pos_train_edge.to(self.device), neg_train_edge.to(self.device)
+        
+        if 'weight' in split_edge['train']:
+            edge_weight_margin = split_edge['train']['weight'].to(self.device)
+        else:
+            edge_weight_margin = None
+
+        total_loss = total_examples = 0
+
+        # ==============================================================
+        # [CURA DO OVERFITTING: EDGE DROPOUT] 
+        # Removemos 15% das arestas do grafo para forçar a GNN a generalizar
+        # ==============================================================
+        edge_index_dropped, _ = dropout_adj(data.edge_index, p=0.15, force_undirected=True, training=self.encoder.training)
+        row, col = edge_index_dropped
+        adj_t_dropped = SparseTensor(row=col, col=row, sparse_sizes=(self.num_nodes, self.num_nodes)).to(self.device)
+        # ==============================================================
+
+        for perm in DataLoader(range(pos_train_edge.size(0)), batch_size, shuffle=True):
+            self.optimizer.zero_grad()
+
+            input_feat = self.create_input_feat(data)
             
-            if 'weight' in split_edge['train']:
-                edge_weight_margin = split_edge['train']['weight'].to(self.device)
+            # ATENÇÃO AQUI: Passamos o adj_t_dropped (grafo furado) em vez do data.adj_t completo
+            h = self.encoder(input_feat, adj_t_dropped)
+            
+            pos_edge = pos_train_edge[perm].t()
+            neg_edge = torch.reshape(neg_train_edge[perm], (-1, 2)).t()
+
+            # ==============================================================
+            # O MOTOR DINÂMICO: Extração Justa de Dados para o Lote Atual
+            # ==============================================================
+            
+            # 1. A Heurística AA-DC (Calculada ao vivo para Verdadeiros e Falsos)
+            if self.use_heuristic:
+                # Utilizamos a função get_batch_aadc (que criámos no utils.py)
+                pos_aadc = get_batch_aadc(data.aadc_matrix, pos_edge).to(self.device)
+                neg_aadc = get_batch_aadc(data.aadc_matrix, neg_edge).to(self.device)
             else:
-                edge_weight_margin = None
+                pos_aadc = None
+                neg_aadc = None
 
-            total_loss = total_examples = 0
-
-            for perm in DataLoader(range(pos_train_edge.size(0)), batch_size, shuffle=True):
-                self.optimizer.zero_grad()
-
-                input_feat = self.create_input_feat(data)
-                h = self.encoder(input_feat, data.adj_t)
+            # 2. O Tempo Contínuo (Bochner)
+            if self.use_temporal:
+                ano_base = 2019 # O limite do OGB Collab
                 
-                pos_edge = pos_train_edge[perm].t()
-                neg_edge = torch.reshape(neg_train_edge[perm], (-1, 2)).t()
-
-                # ==============================================================
-                # O MOTOR DINÂMICO: Extração Justa de Dados para o Lote Atual
-                # ==============================================================
+                # [CORREÇÃO ABLAÇÃO: ALINHAMENTO DE DIMENSÕES]
+                train_years = split_edge['train']['year']
                 
-                # 1. A Heurística AA-DC (Calculada ao vivo para Verdadeiros e Falsos)
-                if self.use_heuristic:
-                    # Utilizamos a função get_batch_aadc (que criámos no utils.py)
-                    pos_aadc = get_batch_aadc(data.aadc_matrix, pos_edge).to(self.device)
-                    neg_aadc = get_batch_aadc(data.aadc_matrix, neg_edge).to(self.device)
-                else:
-                    pos_aadc = None
-                    neg_aadc = None
+                # Se o DataLoader tem mais arestas do que anos disponíveis, significa que 
+                # a flag 'use_valedges_as_input=True' juntou os grafos no plnlp_sign.py.
+                if train_years.size(0) < pos_train_edge.size(0):
+                    if 'year' in split_edge['valid']:
+                        # Replicamos a exata ordem de concatenação feita no script principal: [valid, train]
+                        valid_years = split_edge['valid']['year'].to(train_years.device)
+                        train_years = torch.cat([valid_years, train_years], dim=0)
+                
+                # Delta-T para as colaborações reais (Treino) usando o array alinhado
+                pos_anos = train_years[perm].to(self.device)
+                pos_dt = (ano_base - pos_anos).view(-1, 1).float()
+                
+                # Sorteia anos aleatórios do conjunto alinhado para os negativos
+                todos_anos = train_years.to(self.device)
+                idx_aleatorios = torch.randint(0, todos_anos.size(0), (neg_edge.size(1),), device=self.device)
+                neg_anos_sorteados = todos_anos[idx_aleatorios]
+                
+                neg_dt = (ano_base - neg_anos_sorteados).view(-1, 1).float()
+            else:
+                pos_dt = None
+                neg_dt = None
+                
+            # ==============================================================
+            # A CHAMADA AO PREDITOR (Sem leakage de dados)
+            # ==============================================================
+            if self.use_temporal or self.use_heuristic:
+                # Os dados entram no forward da classe AblationPredictor aqui!
+                pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]], edge_dt=pos_dt, edge_aadc=pos_aadc)
+                neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]], edge_dt=neg_dt, edge_aadc=neg_aadc)
+            else:
+                pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]])
+                neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]])
 
-                # 2. O Tempo Contínuo (Bochner)
-                # 2. O Tempo Contínuo (Bochner) - CORRIGIDO PARA EVITAR LEAKAGE
-                # 2. O Tempo Contínuo (Bochner) - CORRIGIDO PARA EVITAR INDEX ERROR
-                if self.use_temporal:
-                    ano_base = 2019 # O limite do OGB Collab
-                    
-                    # [CORREÇÃO ABLAÇÃO: ALINHAMENTO DE DIMENSÕES]
-                    train_years = split_edge['train']['year']
-                    
-                    # Se o DataLoader tem mais arestas do que anos disponíveis, significa que 
-                    # a flag 'use_valedges_as_input=True' juntou os grafos no plnlp_sign.py.
-                    if train_years.size(0) < pos_train_edge.size(0):
-                        if 'year' in split_edge['valid']:
-                            # Replicamos a exata ordem de concatenação feita no script principal: [valid, train]
-                            valid_years = split_edge['valid']['year'].to(train_years.device)
-                            train_years = torch.cat([valid_years, train_years], dim=0)
-                    
-                    # Delta-T para as colaborações reais (Treino) usando o array alinhado
-                    pos_anos = train_years[perm].to(self.device)
-                    pos_dt = (ano_base - pos_anos).view(-1, 1).float()
-                    
-                    # Sorteia anos aleatórios do conjunto alinhado para os negativos
-                    todos_anos = train_years.to(self.device)
-                    idx_aleatorios = torch.randint(0, todos_anos.size(0), (neg_edge.size(1),), device=self.device)
-                    neg_anos_sorteados = todos_anos[idx_aleatorios]
-                    
-                    neg_dt = (ano_base - neg_anos_sorteados).view(-1, 1).float()
-                else:
-                    pos_dt = None
-                    neg_dt = None
-                # ==============================================================
-                # A CHAMADA AO PREDITOR (Sem leakage de dados)
-                # ==============================================================
-                if self.use_temporal or self.use_heuristic:
-                    # Os dados entram no forward da classe AblationPredictor aqui!
-                    pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]], edge_dt=pos_dt, edge_aadc=pos_aadc)
-                    neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]], edge_dt=neg_dt, edge_aadc=neg_aadc)
-                else:
-                    pos_out = self.predictor(h[pos_edge[0]], h[pos_edge[1]])
-                    neg_out = self.predictor(h[neg_edge[0]], h[neg_edge[1]])
+            # (O resto da função continua igual: cálculo da loss, backward, step)
+            weight_margin = edge_weight_margin[perm] if edge_weight_margin is not None else None
 
-                # (O resto da função continua igual: cálculo da loss, backward, step)
-                weight_margin = edge_weight_margin[perm] if edge_weight_margin is not None else None
+            loss = self.calculate_loss(pos_out, neg_out, num_neg, margin=weight_margin)
+            loss.backward()
 
-                loss = self.calculate_loss(pos_out, neg_out, num_neg, margin=weight_margin)
-                loss.backward()
+            if self.clip_norm >= 0:
+                torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.clip_norm)
+                torch.nn.utils.clip_grad_norm_(self.predictor.parameters(), self.clip_norm)
 
-                if self.clip_norm >= 0:
-                    torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), self.clip_norm)
-                    torch.nn.utils.clip_grad_norm_(self.predictor.parameters(), self.clip_norm)
+            self.optimizer.step()
 
-                self.optimizer.step()
+            num_examples = pos_out.size(0)
+            total_loss += loss.item() * num_examples
+            total_examples += num_examples
 
-                num_examples = pos_out.size(0)
-                total_loss += loss.item() * num_examples
-                total_examples += num_examples
-
-            return total_loss / total_examples
-
+        return total_loss / total_examples
     @torch.no_grad()
     # [CIRURGIA ABLAÇÃO: ARGS DO BATCH_PREDICT] 
     def batch_predict(self, h, edges, batch_size, edge_times=None, edge_aadcs=None):
