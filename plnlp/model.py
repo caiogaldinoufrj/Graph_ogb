@@ -207,7 +207,7 @@ class BaseModel(object):
         # [CURA DO OVERFITTING: EDGE DROPOUT] 
         # Removemos 15% das arestas do grafo para forçar a GNN a generalizar
         # ==============================================================
-        edge_index_dropped, _ = dropout_edge(data.edge_index, p=0.3, force_undirected=True, training=self.encoder.training)
+        edge_index_dropped, _ = dropout_edge(data.edge_index, p=0.4, force_undirected=True, training=self.encoder.training)
         row, col = edge_index_dropped
         adj_t_dropped = SparseTensor(row=col, col=row, sparse_sizes=(self.num_nodes, self.num_nodes)).to(self.device)
         # ==============================================================
@@ -234,8 +234,8 @@ class BaseModel(object):
                 
                 # ADICIONAR RUÍDO (Dropout) NA HEURÍSTICA DURANTE O TREINO
                 # Zera aleatoriamente 30% dos valores do AA-DC para forçar o MLP a usar a GNN
-                mask_pos = (torch.rand(pos_aadc.size(), device=self.device) > 0.3).float()
-                mask_neg = (torch.rand(neg_aadc.size(), device=self.device) > 0.3).float()
+                mask_pos = (torch.rand(pos_aadc.size(), device=self.device) > 0.35).float()
+                mask_neg = (torch.rand(neg_aadc.size(), device=self.device) > 0.35).float()
                 pos_aadc = pos_aadc * mask_pos
                 neg_aadc = neg_aadc * mask_neg
             else:

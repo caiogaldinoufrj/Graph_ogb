@@ -125,13 +125,122 @@ def generate_neg_dist_table(num_nodes, adj_t, power=0.75, table_size=1e8):
     return sample_table
 
 # =======================================================================
-# [MÓDULO DE CÁLCULO DINÂMICO PARA ABLAÇÃO] (Adicione no final de utils.py)
+# [MÓDULO DE CÁLCULO DINÂMICO PARA ABLAÇÃO] 
 # =======================================================================
 def precompute_aadc_matrix(adj_t):
     """
-    Pré-calcula a Matriz Esparsa de Adamic-Adar + Degree Centrality.
-    Isso permite que você pegue o AA-DC de qualquer par falso gerado em O(1).
+    Pré-calcula o AA Clássico e já aplica a Dual Correction (Gate) do autor 
+    uma única vez para não afogar o loop de treino.
     """
+    row, col, _ = adj_t.coo()
+    deg = adj_t.sum(dim=1).to(torch.float)
+    
+    # 1. Lógica Adamic-Adar clássica
+    deg_log = torch.log(deg)
+    deg_log[deg_log < 1e-10] = 1.0 
+    weight = 1.0 / deg_log
+    weight[deg <= 1] = 0.0 
+    
+    adj_w = SparseTensor(row=row, col=col, value=weight[col], sparse_sizes=adj_t.sparse_sizes())
+    aadc_matrix = adj_t.matmul(adj_w.t())
+    
+    # 2. Construir lista de adjacência rápida para o cálculo do "Gate"
+    edges_np = torch.stack([row, col], dim=1).cpu().numpy()
+    num_nodes = adj_t.size(0)
+    adj_list = [set() for _ in range(num_nodes)]
+    for u, v in edges_np:
+        u, v = int(u), int(v)
+        if u != v:
+            adj_list[u].add(v)
+            adj_list[v].add(u)
+            
+    # 3. Aplica o Gate do autor globalmente antes do treino
+    try:
+        a_row, a_col, a_val = aadc_matrix.coo()
+        a_row_np = a_row.cpu().numpy()
+        a_col_np = a_col.cpu().numpy()
+        a_val_np = a_val.cpu().numpy()
+        
+        final_mapping = {}
+        print(">>> Calculando AA + Dual Correction (Gate) globalmente. Aguarde...")
+        
+        for i in range(len(a_row_np)):
+            u = int(a_row_np[i])
+            v = int(a_col_np[i])
+            aa_val = float(a_val_np[i])
+            
+            # Se já for 0 ou loop em si mesmo, descarta
+            if aa_val == 0.0 or u == v:
+                continue
+                
+            # --- Início da lógica do Gate (CN External Ratio) ---
+            cn_set = adj_list[u] & adj_list[v]
+            k = len(cn_set)
+            
+            if k == 0:
+                continue
+                
+            local_set = adj_list[u] | adj_list[v] | {u, v}
+            total_ext = 0.0
+            
+            for w in cn_set:
+                adj_w = adj_list[w]
+                deg_w = len(adj_w)
+                if deg_w > 0:
+                    external = len(adj_w - local_set)
+                    total_ext += external / deg_w
+                    
+            ext_ratio = total_ext / k
+            
+            # Penalidade do autor: 0.5 se ext_ratio > 0.5
+            gate = 0.5 if ext_ratio > 0.5 else 1.0
+            # --- Fim da lógica do Gate ---
+            
+            # Grava o valor final (AA penalizado) no dicionário
+            final_mapping[(u, v)] = aa_val * gate
+            
+        aadc_matrix._aadc_mapping = final_mapping
+        aadc_matrix._adj_list = None # Libera memória RAM
+        
+    except Exception as e:
+        print(">>> Erro no pre-calculo da Heurística:", e)
+        aadc_matrix._aadc_mapping = None
+        
+    return aadc_matrix
+
+def get_batch_aadc(aadc_matrix, edge_index):
+    """ 
+    Extrai o AA+DC rapidamente (O(1)). 
+    O trabalho pesado já foi feito na pré-computação.
+    """
+    row = edge_index[0].cpu().numpy()
+    col = edge_index[1].cpu().numpy()
+    
+    mapping = getattr(aadc_matrix, '_aadc_mapping', None)
+    
+    # Extração limpa e super leve para o lote
+    if mapping is not None:
+        return torch.tensor([mapping.get((int(u), int(v)), 0.0) for u, v in zip(row, col)], dtype=torch.float)
+
+    # Fallback caso a matriz seja acessada diretamente (menos eficiente)
+    out = []
+    for u, v in zip(row, col):
+        try:
+            val = aadc_matrix[int(u), int(v)]
+            out.append(float(val.item()) if hasattr(val, 'item') else float(val))
+        except Exception:
+            out.append(0.0)
+            
+    return torch.tensor(out, dtype=torch.float)
+
+#================================================
+#ADAMIC-ADAR PURO
+#================================================
+"""
+def precompute_aadc_matrix(adj_t):
+    
+    #Pré-calcula a Matriz Esparsa de Adamic-Adar
+    
     row, col, _ = adj_t.coo()
     deg = adj_t.sum(dim=1).to(torch.float)
     
@@ -154,7 +263,7 @@ def precompute_aadc_matrix(adj_t):
     return aadc_matrix
 
 def get_batch_aadc(aadc_matrix, edge_index):
-    """ Extrai rapidamente os valores da matriz esparsa para o lote atual (Verdadeiros ou Falsos) """
+    #Extrai rapidamente os valores da matriz esparsa para o lote atual (Verdadeiros ou Falsos)
     row, col = edge_index[0], edge_index[1]
     # No PyTorch Geometric/Sparse, extrair valores discretos pode ser feito mapeando:
     # Se aadc_matrix for muito densa, essa operação requer cuidado, 
@@ -186,3 +295,4 @@ def get_batch_aadc(aadc_matrix, edge_index):
             except Exception:
                 out.append(0.0)
         return torch.tensor(out, dtype=torch.float)
+"""        
