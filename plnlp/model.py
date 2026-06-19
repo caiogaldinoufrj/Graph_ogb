@@ -325,25 +325,35 @@ class BaseModel(object):
 
         # --- TEMPO (Bochner) ---
         # --- TEMPO (Bochner) NO TESTE ---
+        # --- TEMPO (Bochner) NO TESTE ---
         if self.use_temporal:
-            # Calcula a média dos anos de treino para servir de baseline neutra
-            ano_medio_treino = split_edge['train']['year'].float().mean()
-            
-            # Validação
+            # ==========================================
+            # VALIDAÇÃO
+            # ==========================================
             if 'year' in split_edge['valid']:
-                v_pos_dt = (ano_base - split_edge['valid']['year']).view(-1, 1).float()
+                valid_years = split_edge['valid']['year'].to(self.device)
+                v_pos_dt = (ano_base - valid_years).view(-1, 1).float()
+                
+                # Sorteia anos reais da validação para camuflar os negativos
+                idx_v = torch.randint(0, valid_years.size(0), (neg_valid_edge.size(0),), device=self.device)
+                v_neg_dt = (ano_base - valid_years[idx_v]).view(-1, 1).float()
             else:
-                v_pos_dt = torch.zeros(pos_valid_edge.size(0), 1).float()
-            
-            # Em vez de zeros, use o ano médio de treino para o negativo
-            v_neg_dt = (ano_base - ano_medio_treino) * torch.ones(neg_valid_edge.size(0), 1, device=self.device)
+                v_pos_dt = torch.zeros(pos_valid_edge.size(0), 1, device=self.device).float()
+                v_neg_dt = torch.zeros(neg_valid_edge.size(0), 1, device=self.device).float()
 
-            # Teste
+            # ==========================================
+            # TESTE
+            # ==========================================
             if 'year' in split_edge['test']:
-                t_pos_dt = (ano_base - split_edge['test']['year']).view(-1, 1).float()
+                test_years = split_edge['test']['year'].to(self.device)
+                t_pos_dt = (ano_base - test_years).view(-1, 1).float()
+                
+                # Sorteia anos reais do teste para camuflar os negativos
+                idx_t = torch.randint(0, test_years.size(0), (neg_test_edge.size(0),), device=self.device)
+                t_neg_dt = (ano_base - test_years[idx_t]).view(-1, 1).float()
             else:
-                t_pos_dt = torch.zeros(pos_test_edge.size(0), 1).float()
-            t_neg_dt = (ano_base - ano_medio_treino) * torch.ones(neg_test_edge.size(0), 1, device=self.device)
+                t_pos_dt = torch.zeros(pos_test_edge.size(0), 1, device=self.device).float()
+                t_neg_dt = torch.zeros(neg_test_edge.size(0), 1, device=self.device).float()
         else:
             v_pos_dt = v_neg_dt = t_pos_dt = t_neg_dt = None
 
