@@ -229,9 +229,15 @@ class BaseModel(object):
             
             # 1. A Heurística AA-DC (Calculada ao vivo para Verdadeiros e Falsos)
             if self.use_heuristic:
-                # Utilizamos a função get_batch_aadc (que criámos no utils.py)
                 pos_aadc = get_batch_aadc(data.aadc_matrix, pos_edge).to(self.device)
                 neg_aadc = get_batch_aadc(data.aadc_matrix, neg_edge).to(self.device)
+                
+                # ADICIONAR RUÍDO (Dropout) NA HEURÍSTICA DURANTE O TREINO
+                # Zera aleatoriamente 30% dos valores do AA-DC para forçar o MLP a usar a GNN
+                mask_pos = (torch.rand(pos_aadc.size(), device=self.device) > 0.3).float()
+                mask_neg = (torch.rand(neg_aadc.size(), device=self.device) > 0.3).float()
+                pos_aadc = pos_aadc * mask_pos
+                neg_aadc = neg_aadc * mask_neg
             else:
                 pos_aadc = None
                 neg_aadc = None
