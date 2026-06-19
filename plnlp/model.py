@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from plnlp.layer import *
 from plnlp.loss import *
 from plnlp.utils import *
-from torch_geometric.utils import dropout_adj
+from torch_geometric.utils import dropout_edge
 from torch_sparse import SparseTensor
 
 # =======================================================================
@@ -207,7 +207,7 @@ class BaseModel(object):
         # [CURA DO OVERFITTING: EDGE DROPOUT] 
         # Removemos 15% das arestas do grafo para forçar a GNN a generalizar
         # ==============================================================
-        edge_index_dropped, _ = dropout_adj(data.edge_index, p=0.15, force_undirected=True, training=self.encoder.training)
+        edge_index_dropped, _ = dropout_edge(data.edge_index, p=0.3, force_undirected=True, training=self.encoder.training)
         row, col = edge_index_dropped
         adj_t_dropped = SparseTensor(row=col, col=row, sparse_sizes=(self.num_nodes, self.num_nodes)).to(self.device)
         # ==============================================================
