@@ -64,31 +64,25 @@ class Transformer(BaseGNN):
 
 
 # =======================================================================
-# [CIRURGIA ABLAÇÃO: ESPACIAL] Difusão Dinâmica (Inception + Jumping Knowledge)
+# [CIRURGIA ABLAÇÃO: ESPACIAL] Difusão Dinâmica (Módulo Inception)
 # =======================================================================
 class InceptionGNN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers, dropout):
         super(InceptionGNN, self).__init__()
         self.dropout = dropout
         
-        # Como o in_channels pode ser diferente do hidden_channels (ex: features vs emb),
-        # precisamos de uma projeção inicial para garantir que tudo tenha o mesmo tamanho
-        # para podermos somar nas conexões residuais (Jumping Knowledge)
-        self.input_proj = torch.nn.Linear(in_channels, hidden_channels)
-        self.input_norm = torch.nn.LayerNorm(hidden_channels)
-        
         # Canal A: 1 Salto
-        self.branch1_conv = SAGEConv(hidden_channels, hidden_channels)
+        self.branch1_conv = SAGEConv(in_channels, hidden_channels)
         self.branch1_norm = torch.nn.LayerNorm(hidden_channels)
         
         # Canal B: 2 Saltos
-        self.branch2_conv1 = SAGEConv(hidden_channels, hidden_channels)
+        self.branch2_conv1 = SAGEConv(in_channels, hidden_channels)
         self.branch2_norm1 = torch.nn.LayerNorm(hidden_channels)
         self.branch2_conv2 = SAGEConv(hidden_channels, hidden_channels)
         self.branch2_norm2 = torch.nn.LayerNorm(hidden_channels)
         
         # Canal C: 3 Saltos
-        self.branch3_conv1 = SAGEConv(hidden_channels, hidden_channels)
+        self.branch3_conv1 = SAGEConv(in_channels, hidden_channels)
         self.branch3_norm1 = torch.nn.LayerNorm(hidden_channels)
         self.branch3_conv2 = SAGEConv(hidden_channels, hidden_channels)
         self.branch3_norm2 = torch.nn.LayerNorm(hidden_channels)
@@ -100,9 +94,6 @@ class InceptionGNN(torch.nn.Module):
         self.project_norm = torch.nn.LayerNorm(hidden_channels)
 
     def reset_parameters(self):
-        self.input_proj.reset_parameters()
-        self.input_norm.reset_parameters()
-        
         self.branch1_conv.reset_parameters()
         self.branch1_norm.reset_parameters()
         
@@ -122,57 +113,44 @@ class InceptionGNN(torch.nn.Module):
         self.project_norm.reset_parameters()
 
     def forward(self, x, adj_t):
-        # 0. Projeção Inicial (Necessário para o Jumping Knowledge)
-        # Alinha a dimensionalidade de entrada para permitir somas residuais
-        h_in = self.input_proj(x)
-        h_in = self.input_norm(h_in)
-        h_in = F.relu(h_in)
-        h_in = F.dropout(h_in, p=self.dropout, training=self.training)
-        
-        # Fluxo Paralelo A: 1-hop (Residual com a entrada)
-        h1 = self.branch1_conv(h_in, adj_t)
+        # Fluxo Paralelo A: 1-hop
+        h1 = self.branch1_conv(x, adj_t)
         h1 = self.branch1_norm(h1)
         h1 = F.relu(h1)
         h1 = F.dropout(h1, p=self.dropout, training=self.training)
-        h1 = h1 + h_in # <--- [JUMPING KNOWLEDGE: Ponte expressa da Entrada]
         
-        # Fluxo Paralelo B: 2-hops (Conexões Residuais Densas)
-        h2_1 = self.branch2_conv1(h_in, adj_t)
-        h2_1 = self.branch2_norm1(h2_1)
-        h2_1 = F.relu(h2_1)
-        h2_1 = F.dropout(h2_1, p=self.dropout, training=self.training)
-        h2_1 = h2_1 + h_in # <--- [JUMPING KNOWLEDGE: Salva o 1º Salto]
+        # Fluxo Paralelo B: 2-hops
+        h2 = self.branch2_conv1(x, adj_t)
+        h2 = self.branch2_norm1(h2)
+        h2 = F.relu(h2)
+        h2 = F.dropout(h2, p=self.dropout, training=self.training)
         
-        h2 = self.branch2_conv2(h2_1, adj_t)
+        h2 = self.branch2_conv2(h2, adj_t)
         h2 = self.branch2_norm2(h2)
         h2 = F.relu(h2)
         h2 = F.dropout(h2, p=self.dropout, training=self.training)
-        h2 = h2 + h2_1 # <--- [JUMPING KNOWLEDGE: Salva o 2º Salto]
         
-        # Fluxo Paralelo C: 3-hops (Conexões Residuais Densas)
-        h3_1 = self.branch3_conv1(h_in, adj_t)
-        h3_1 = self.branch3_norm1(h3_1)
-        h3_1 = F.relu(h3_1)
-        h3_1 = F.dropout(h3_1, p=self.dropout, training=self.training)
-        h3_1 = h3_1 + h_in
+        # Fluxo Paralelo C: 3-hops
+        h3 = self.branch3_conv1(x, adj_t)
+        h3 = self.branch3_norm1(h3)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
         
-        h3_2 = self.branch3_conv2(h3_1, adj_t)
-        h3_2 = self.branch3_norm2(h3_2)
-        h3_2 = F.relu(h3_2)
-        h3_2 = F.dropout(h3_2, p=self.dropout, training=self.training)
-        h3_2 = h3_2 + h3_1
+        h3 = self.branch3_conv2(h3, adj_t)
+        h3 = self.branch3_norm2(h3)
+        h3 = F.relu(h3)
+        h3 = F.dropout(h3, p=self.dropout, training=self.training)
         
-        h3 = self.branch3_conv3(h3_2, adj_t)
+        h3 = self.branch3_conv3(h3, adj_t)
         h3 = self.branch3_norm3(h3)
         h3 = F.relu(h3)
         h3 = F.dropout(h3, p=self.dropout, training=self.training)
-        h3 = h3 + h3_2 # <--- [JUMPING KNOWLEDGE: Ponte expressa final do Canal C]
         
-        # A Mágica do Inception (Agora com Memória de todos os saltos!)
+        # A Mágica do Inception
         out = torch.cat([h1, h2, h3], dim=-1)
         out = self.project(out)
-        out = self.project_norm(out) 
-        out = F.relu(out)            
+        out = self.project_norm(out) # Normaliza a fusão
+        out = F.relu(out)            # Aplica ativação final
         
         return out
 # =======================================================================
