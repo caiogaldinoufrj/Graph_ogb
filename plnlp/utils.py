@@ -127,11 +127,11 @@ def generate_neg_dist_table(num_nodes, adj_t, power=0.75, table_size=1e8):
 # =======================================================================
 # [MÓDULO DE CÁLCULO DINÂMICO PARA ABLAÇÃO] 
 # =======================================================================
+"""
 def precompute_aadc_matrix(adj_t):
-    """
-    Pré-calcula o AA Clássico e já aplica a Dual Correction (Gate) do autor 
-    uma única vez para não afogar o loop de treino.
-    """
+    
+    #Pré-calcula o AA Clássico e já aplica a Dual Correction (Gate) do autor uma única vez para não afogar o loop de treino.
+
     row, col, _ = adj_t.coo()
     deg = adj_t.sum(dim=1).to(torch.float)
     
@@ -209,10 +209,9 @@ def precompute_aadc_matrix(adj_t):
     return aadc_matrix
 
 def get_batch_aadc(aadc_matrix, edge_index):
-    """ 
-    Extrai o AA+DC rapidamente (O(1)). 
-    O trabalho pesado já foi feito na pré-computação.
-    """
+     
+    #Extrai o AA+DC rapidamente (O(1)).  O trabalho pesado já foi feito na pré-computação.
+    
     row = edge_index[0].cpu().numpy()
     col = edge_index[1].cpu().numpy()
     
@@ -232,11 +231,11 @@ def get_batch_aadc(aadc_matrix, edge_index):
             out.append(0.0)
             
     return torch.tensor(out, dtype=torch.float)
-
+"""
 #================================================
 #ADAMIC-ADAR PURO
 #================================================
-"""
+
 def precompute_aadc_matrix(adj_t):
     
     #Pré-calcula a Matriz Esparsa de Adamic-Adar
@@ -295,4 +294,3 @@ def get_batch_aadc(aadc_matrix, edge_index):
             except Exception:
                 out.append(0.0)
         return torch.tensor(out, dtype=torch.float)
-"""        

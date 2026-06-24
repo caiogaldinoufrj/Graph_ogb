@@ -205,7 +205,7 @@ class BaseModel(object):
 
         # ==============================================================
         # [CURA DO OVERFITTING: EDGE DROPOUT] 
-        # Removemos 15% das arestas do grafo para forçar a GNN a generalizar
+        # Removemos 40% das arestas do grafo para forçar a GNN a generalizar
         # ==============================================================
         edge_index_dropped, _ = dropout_edge(data.edge_index, p=0.4, force_undirected=True, training=self.encoder.training)
         row, col = edge_index_dropped
@@ -233,7 +233,7 @@ class BaseModel(object):
                 neg_aadc = get_batch_aadc(data.aadc_matrix, neg_edge).to(self.device)
                 
                 # ADICIONAR RUÍDO (Dropout) NA HEURÍSTICA DURANTE O TREINO
-                # Zera aleatoriamente 30% dos valores do AA-DC para forçar o MLP a usar a GNN
+                # Zera aleatoriamente 35% dos valores do AA-DC para forçar o MLP a usar a GNN
                 mask_pos = (torch.rand(pos_aadc.size(), device=self.device) > 0.35).float()
                 mask_neg = (torch.rand(neg_aadc.size(), device=self.device) > 0.35).float()
                 pos_aadc = pos_aadc * mask_pos
