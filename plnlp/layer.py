@@ -157,7 +157,7 @@ class InceptionGNN(torch.nn.Module):
 
 """
 # =======================================================================
-# [CIRURGIA ABLAÇÃO: ESPACIAL] Difusão Dinâmica (Módulo Inception 4-hops)
+# [CIRURGIA ABLAÇÃO: ESPACIAL] Difusão Dinâmica (Módulo Inception 2-hops)
 # =======================================================================
 class InceptionGNN(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, num_layers, dropout):
@@ -174,26 +174,8 @@ class InceptionGNN(torch.nn.Module):
         self.branch2_conv2 = SAGEConv(hidden_channels, hidden_channels)
         self.branch2_norm2 = torch.nn.LayerNorm(hidden_channels)
         
-        # Canal C: 3 Saltos
-        self.branch3_conv1 = SAGEConv(in_channels, hidden_channels)
-        self.branch3_norm1 = torch.nn.LayerNorm(hidden_channels)
-        self.branch3_conv2 = SAGEConv(hidden_channels, hidden_channels)
-        self.branch3_norm2 = torch.nn.LayerNorm(hidden_channels)
-        self.branch3_conv3 = SAGEConv(hidden_channels, hidden_channels)
-        self.branch3_norm3 = torch.nn.LayerNorm(hidden_channels)
-        
-        # Canal D: 4 Saltos
-        self.branch4_conv1 = SAGEConv(in_channels, hidden_channels)
-        self.branch4_norm1 = torch.nn.LayerNorm(hidden_channels)
-        self.branch4_conv2 = SAGEConv(hidden_channels, hidden_channels)
-        self.branch4_norm2 = torch.nn.LayerNorm(hidden_channels)
-        self.branch4_conv3 = SAGEConv(hidden_channels, hidden_channels)
-        self.branch4_norm3 = torch.nn.LayerNorm(hidden_channels)
-        self.branch4_conv4 = SAGEConv(hidden_channels, hidden_channels)
-        self.branch4_norm4 = torch.nn.LayerNorm(hidden_channels)
-        
-        # Fuso de Concatenamento (Agora recebe 4 canais)
-        self.project = torch.nn.Linear(4 * hidden_channels, hidden_channels)
+        # Fuso de Concatenamento (Agora recebe apenas 2 canais)
+        self.project = torch.nn.Linear(2 * hidden_channels, hidden_channels)
         self.project_norm = torch.nn.LayerNorm(hidden_channels)
 
     def reset_parameters(self):
@@ -204,22 +186,6 @@ class InceptionGNN(torch.nn.Module):
         self.branch2_norm1.reset_parameters()
         self.branch2_conv2.reset_parameters()
         self.branch2_norm2.reset_parameters()
-        
-        self.branch3_conv1.reset_parameters()
-        self.branch3_norm1.reset_parameters()
-        self.branch3_conv2.reset_parameters()
-        self.branch3_norm2.reset_parameters()
-        self.branch3_conv3.reset_parameters()
-        self.branch3_norm3.reset_parameters()
-        
-        self.branch4_conv1.reset_parameters()
-        self.branch4_norm1.reset_parameters()
-        self.branch4_conv2.reset_parameters()
-        self.branch4_norm2.reset_parameters()
-        self.branch4_conv3.reset_parameters()
-        self.branch4_norm3.reset_parameters()
-        self.branch4_conv4.reset_parameters()
-        self.branch4_norm4.reset_parameters()
         
         self.project.reset_parameters()
         self.project_norm.reset_parameters()
@@ -242,52 +208,14 @@ class InceptionGNN(torch.nn.Module):
         h2 = F.relu(h2)
         h2 = F.dropout(h2, p=self.dropout, training=self.training)
         
-        # Fluxo Paralelo C: 3-hops
-        h3 = self.branch3_conv1(x, adj_t)
-        h3 = self.branch3_norm1(h3)
-        h3 = F.relu(h3)
-        h3 = F.dropout(h3, p=self.dropout, training=self.training)
-        
-        h3 = self.branch3_conv2(h3, adj_t)
-        h3 = self.branch3_norm2(h3)
-        h3 = F.relu(h3)
-        h3 = F.dropout(h3, p=self.dropout, training=self.training)
-        
-        h3 = self.branch3_conv3(h3, adj_t)
-        h3 = self.branch3_norm3(h3)
-        h3 = F.relu(h3)
-        h3 = F.dropout(h3, p=self.dropout, training=self.training)
-        
-        # Fluxo Paralelo D: 4-hops
-        h4 = self.branch4_conv1(x, adj_t)
-        h4 = self.branch4_norm1(h4)
-        h4 = F.relu(h4)
-        h4 = F.dropout(h4, p=self.dropout, training=self.training)
-        
-        h4 = self.branch4_conv2(h4, adj_t)
-        h4 = self.branch4_norm2(h4)
-        h4 = F.relu(h4)
-        h4 = F.dropout(h4, p=self.dropout, training=self.training)
-        
-        h4 = self.branch4_conv3(h4, adj_t)
-        h4 = self.branch4_norm3(h4)
-        h4 = F.relu(h4)
-        h4 = F.dropout(h4, p=self.dropout, training=self.training)
-        
-        h4 = self.branch4_conv4(h4, adj_t)
-        h4 = self.branch4_norm4(h4)
-        h4 = F.relu(h4)
-        h4 = F.dropout(h4, p=self.dropout, training=self.training)
-        
-        # A Mágica do Inception
-        out = torch.cat([h1, h2, h3, h4], dim=-1)
+        # A Mágica do Inception (Fusão dos 2 canais)
+        out = torch.cat([h1, h2], dim=-1)
         out = self.project(out)
         out = self.project_norm(out) # Normaliza a fusão
         out = F.relu(out)            # Aplica ativação final
         
         return out
-
-
+    
 class MLPPredictor(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, dropout):
         super(MLPPredictor, self).__init__()
